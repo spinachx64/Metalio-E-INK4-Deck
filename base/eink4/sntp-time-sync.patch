@@ -1,0 +1,127 @@
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -34,12 +34,18 @@
+ #include <ctime>
+ #include <cerrno>
+ #include <unistd.h>
++#include <sys/time.h>
+ #include <sys/stat.h>
+ #include <array>
+ #include <algorithm>
++#include <atomic>
+ #include <thread>
+ #include <esp_log.h>
+ #include <esp_app_desc.h>
++#include <esp_event.h>
++#include <esp_netif_types.h>
++#include <esp_sntp.h>
++#include <esp_timer.h>
+ #include <cJSON.h>
+ #include <driver/gpio.h>
+ #include <arpa/inet.h>
+@@ -51,7 +57,86 @@
+ 
+ constexpr int kAssistantNetSliceMs = 200;
+ constexpr int kAssistantNetBudgetMs = 30000;
++
++// Standard SNTP time sync fallback (official Metalio-E-INK4 only syncs time via cloud OTA).
++// Official firmware stores local time (UTC + offset) directly in tv_sec (see ota.cc) and PCF8563.
++constexpr time_t kSntpLocalTzOffsetSec = 8 * 3600;  // UTC+8 (Asia/Shanghai)
++constexpr int64_t kSntpResyncIntervalUs = 6LL * 3600 * 1000000;
++constexpr int64_t kSntpRetryAfterUs = 60LL * 1000000;
++
++std::atomic<bool> g_sntp_syncing{false};
++std::atomic<int64_t> g_sntp_last_sync_us{0};
++std::atomic<int64_t> g_sntp_start_us{0};
++
++void OnSntpTimeSynced(struct timeval* tv) {
++    if (tv == nullptr) {
++        return;
++    }
++    struct timeval local_tv = *tv;
++    local_tv.tv_sec += kSntpLocalTzOffsetSec;
++    settimeofday(&local_tv, nullptr);
++
++    g_sntp_last_sync_us.store(esp_timer_get_time());
++    g_sntp_syncing.store(false);
++
++    Application::GetInstance().Schedule([local_tv]() {
++        if (esp_sntp_enabled()) {
++            esp_sntp_stop();
++        }
++        Board::GetInstance().OnNetworkTimeSynced();
++        struct tm tm_info = {};
++        localtime_r(&local_tv.tv_sec, &tm_info);
++        ESP_LOGI(TAG, "SNTP synced (UTC+8) & written to RTC: %04d-%02d-%02d %02d:%02d:%02d",
++                 tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
++                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
++        if (auto* display = Board::GetInstance().GetDisplay()) {
++            display->UpdateStatusBar(true);
++        }
++    });
++}
++
++void RequestSntpTimeSync(bool force = false) {
++    const int64_t now_us = esp_timer_get_time();
++    const int64_t last_us = g_sntp_last_sync_us.load();
++    if (!force && last_us > 0 && (now_us - last_us) < kSntpResyncIntervalUs) {
++        return;
++    }
++    if (g_sntp_syncing.load() && (now_us - g_sntp_start_us.load()) < kSntpRetryAfterUs) {
++        return;
++    }
++    g_sntp_syncing.store(true);
++    g_sntp_start_us.store(now_us);
++    if (esp_sntp_enabled()) {
++        esp_sntp_stop();
++    }
++    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
++    esp_sntp_setservername(0, "ntp.aliyun.com");
++    esp_sntp_setservername(1, "cn.pool.ntp.org");
++    esp_sntp_setservername(2, "ntp.tencent.com");
++    esp_sntp_set_time_sync_notification_cb(OnSntpTimeSynced);
++    esp_sntp_init();
++    ESP_LOGI(TAG, "SNTP time sync started (ntp.aliyun.com / cn.pool.ntp.org / ntp.tencent.com)");
++}
++
++void OnStaGotIpForSntp(void*, esp_event_base_t, int32_t, void*) {
++    Application::GetInstance().Schedule([]() {
++        RequestSntpTimeSync(false);
++    });
++}
+ 
++void RegisterSntpGotIpHandler() {
++    static bool registered = false;
++    if (registered) {
++        return;
++    }
++    esp_err_t err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &OnStaGotIpForSntp, nullptr);
++    if (err == ESP_OK) {
++        registered = true;
++    } else {
++        ESP_LOGW(TAG, "Failed to register SNTP GOT_IP handler: %s", esp_err_to_name(err));
++    }
++}
++
+ /** 百问进页等网：短切片轮询，离页/进待机即停；切片间隙排空其它 Schedule。 */
+ bool EnsureAssistantNetworkReady() {
+     auto& board = Board::GetInstance();
+@@ -1249,6 +1334,9 @@
+     reader::book_home_snapshot::HydrateFromNvs();
+     reader::book_library_warmup::RequestBootWarmup();
+ 
++    // Register Wi-Fi GOT_IP hook before starting network so SNTP syncs whenever Wi-Fi connects.
++    RegisterSntpGotIpHandler();
++
+     /* 有已存 WiFi：等保网时长；失败不 SoftAP。无 SSID 跳过联网，到设置→网络机上配网 */
+     board.StartNetwork();
+ 
+@@ -1285,6 +1373,8 @@
+     // 联网且拿到 server_time 后，通知板级回写 RTC（如 PCF8563）
+     if (has_server_time_) {
+         board.OnNetworkTimeSynced();
++    } else if (board.IsNetworkReady() && !board.IsWifiConfigMode()) {
++        RequestSntpTimeSync(false);
+     }
+ 
+     // 天气：每天开机拉一次，写入 NVS；当天后续走缓存

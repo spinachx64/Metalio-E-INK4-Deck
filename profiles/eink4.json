@@ -9,7 +9,8 @@
   "upstream": "../../../github/Metalio-E-INK4",
   "upstream_commit": "d12f481f4a42420634bb56a928f3959a977367d4",
   "base_patches": [
-    "base/eink4/power-and-display.patch"
+    "base/eink4/power-and-display.patch",
+    "base/eink4/sntp-time-sync.patch"
   ],
   "sdkconfig_fragment": "base/eink4/sdkconfig.espdeck",
   "keep_official_apps": [
