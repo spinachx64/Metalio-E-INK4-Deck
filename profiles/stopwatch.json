@@ -6,7 +6,7 @@
   "baud": 921600,
   "flash_mode": "app-flash",
   "idf_env": "../ink4-codex-monitor/.state/idf-env.sh",
-  "upstream": "../../github/M5StopWatch-UserDemo",
+  "upstream": "../../../github/M5StopWatch-UserDemo",
   "upstream_commit": "83de653c0be4e51e82079bee2386b90fb0538a25",
   "keep_official_apps": [
     "AppWatchFace",

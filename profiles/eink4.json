@@ -6,7 +6,7 @@
   "baud": 921600,
   "flash_mode": "app-flash",
   "idf_env": "../ink4-codex-monitor/.state/idf-env.sh",
-  "upstream": "../../github/Metalio-E-INK4",
+  "upstream": "../../../github/Metalio-E-INK4",
   "upstream_commit": "d12f481f4a42420634bb56a928f3959a977367d4",
   "base_patches": [
     "base/eink4/power-and-display.patch"
