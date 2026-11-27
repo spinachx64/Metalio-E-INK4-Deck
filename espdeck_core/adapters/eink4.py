@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 
 from ..config import ROOT, AppManifest, DeviceProfile, copy_if_changed, resolve_path, sync_tree_incremental, write_if_changed
-from ..ota import detect_lan_ip
 
 OFFICIAL_APPS: dict[str, tuple[str, str, str]] = {
     "task":      ('"A:ic_app_home_task.spng"',      "Home_AppNameTask",      "TaskScreen::Create"),
@@ -171,19 +170,14 @@ def _write_ota_config_if_needed(output: Path, profile: DeviceProfile, apps: list
     if not any(a.id == "espdeck-ota" for a in apps):
         return False
     ota_cfg = profile.raw.get("ota", {})
-    lan_port = int(ota_cfg.get("lan_port", 8787))
-    udp_port = int(ota_cfg.get("udp_port", 8788))
     remote_url = str(ota_cfg.get("remote_url", "")).rstrip("/")
-    lan_url = f"http://{detect_lan_ip()}:{lan_port}"
     ver = datetime.now().strftime("%Y.%m.%d")
 
     cfg_h = output / "main" / "espdeck_ota" / "espdeck_ota_config.h"
     content = (
         "#pragma once\n"
         f'#define ESPDECK_BUILD_VERSION "{ver}"\n'
-        f'#define ESPDECK_OTA_LAN_URL "{lan_url}"\n'
         f'#define ESPDECK_OTA_REMOTE_URL "{remote_url}"\n'
-        f"#define ESPDECK_OTA_UDP_PORT {udp_port}\n"
     )
     return write_if_changed(cfg_h, content)
 

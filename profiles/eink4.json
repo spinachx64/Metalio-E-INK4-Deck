@@ -21,8 +21,6 @@
     "espdeck-ota"
   ],
   "ota": {
-    "lan_port": 8787,
-    "udp_port": 8788,
     "remote_url": "https://ota-esp.cookup.cn",
     "remote_ssh": ""
   }

@@ -10,7 +10,7 @@ from pathlib import Path
 from .adapters import eink4, mooncake
 from .config import APPS_DIR, DeviceProfile, list_profiles, load_app, load_profile
 from .idf import build_device, flash_device
-from .ota import publish_remote_ota, serve_lan_ota
+from .ota import publish_remote_ota
 
 ADAPTERS = {
     "eink4": eink4,
@@ -128,19 +128,6 @@ def cmd_new_app(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ota_serve(args: argparse.Namespace) -> int:
-    prof = load_profile(args.device)
-    if args.build:
-        _prepare_profile(args.device)
-        rc = build_device(prof)
-        if rc != 0:
-            return rc
-    ota_cfg = prof.raw.get("ota", {})
-    port = args.port or int(ota_cfg.get("lan_port", 8787))
-    udp_port = int(ota_cfg.get("udp_port", 8788))
-    return serve_lan_ota(prof, port=port, udp_port=udp_port, version=args.version, notes=args.notes)
-
-
 def cmd_ota_publish(args: argparse.Namespace) -> int:
     prof = load_profile(args.device)
     if args.build:
@@ -187,18 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     p_new.add_argument("app_id")
     p_new.set_defaults(func=cmd_new_app)
 
-    p_ota = sub.add_parser("ota", help="Dual-mode Wi-Fi OTA (LAN serve / remote HTTPS publish)")
+    p_ota = sub.add_parser("ota", help="Online HTTPS OTA publisher")
     ota_sub = p_ota.add_subparsers(dest="ota_cmd", required=True)
 
-    p_serve = ota_sub.add_parser("serve", help="Start LAN HTTP OTA server + UDP auto-discovery beacon")
-    p_serve.add_argument("device")
-    p_serve.add_argument("--port", type=int, default=0)
-    p_serve.add_argument("--build", action="store_true", help="Build firmware before serving")
-    p_serve.add_argument("--version", default=None)
-    p_serve.add_argument("--notes", default="LAN dev OTA")
-    p_serve.set_defaults(func=cmd_ota_serve)
-
-    p_pub = ota_sub.add_parser("publish", help="Stage release and rsync to remote HTTPS server")
+    p_pub = ota_sub.add_parser("publish", help="Stage release and publish to remote HTTPS server")
     p_pub.add_argument("device")
     p_pub.add_argument("--remote", default=None, help="Override ssh destination (e.g. user@host:/path/to/ota)")
     p_pub.add_argument("--base-url", default=None, help="Public HTTPS base URL (e.g. https://ota.example.com)")

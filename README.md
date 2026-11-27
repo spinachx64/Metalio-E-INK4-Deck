@@ -8,7 +8,7 @@ Metalio E-INK4 墨水屏桌面应用底座与固件编排工具。
 - **一键屏蔽官方应用**：通过 `keep_official_apps` 隐藏不需要的官方应用（默认仅保留 `setting`），同时自动裁剪代码释放约 1MB+ Flash 空间。
 - **底座省电补丁抽离**：底层过度轮询降频与显示优化收口在 `base/eink4/`，官方 `Metalio-E-INK4` 仓库保持只读。
 - **外部应用仓库挂载**：支持直接引用独立的外部应用仓库（如 `usagi-pines`、`codex-monitor`），增量同步源码，互不覆盖。
-- **Wi-Fi OTA 无线升级**：支持局域网自动发现与线上 HTTPS 升级（`https://ota-esp.cookup.cn`），内置 SHA-256 完整性校验与双分区安全回滚。
+- **在线 HTTPS OTA 升级**：支持公网无线升级（`https://ota-esp.cookup.cn`），内置 SHA-256 完整性校验与双分区安全回滚。
 - **MAC 校验防刷错**：可在本地未提交的 `profiles/eink4.local.json` 中配置私有 `board_mac` 与 `ota.remote_ssh`，烧录前自动校验并默认使用 `app-flash`。
 
 ## 快速使用
@@ -25,9 +25,6 @@ Metalio E-INK4 墨水屏桌面应用底座与固件编排工具。
 
 # 校验 MAC 地址并安全烧录（app-flash）
 ./espdeck flash eink4
-
-# 局域网 Wi-Fi OTA（自动广播 UDP 8788，设备打开 OTA 应用自动发现）
-./espdeck ota serve eink4 --build
 
 # 线上 HTTPS OTA 发布（OTA 域名：https://ota-esp.cookup.cn）
 ./espdeck ota publish eink4 --build
