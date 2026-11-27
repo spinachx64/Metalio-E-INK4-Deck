@@ -72,6 +72,7 @@ enum class UiPhase : int {
     Upgrading = 3,
     Error = 4,
     Done = 5,
+    UpToDate = 6,
 };
 
 struct OtaView {
@@ -274,6 +275,14 @@ void doCheck(OtaView* v) {
 
     if (ver.empty()) {
         setPhase(v, UiPhase::Error, "版本信息缺少版本号");
+        return;
+    }
+
+    // Compare YYYY.MM.DD-HHMMSS lexicographically against running firmware version
+    const std::string curr_ver = ESPDECK_BUILD_VERSION;
+    if (ver <= curr_ver) {
+        v->has_release.store(false);
+        setPhase(v, UiPhase::UpToDate, "当前固件已是最新版本，无需升级");
         return;
     }
 
@@ -636,10 +645,17 @@ void refreshUi(lv_timer_t* t) {
             std::snprintf(sub_buf, sizeof(sub_buf), "当前版本  %s", ESPDECK_BUILD_VERSION);
             lv_label_set_text(v->lbl_sub, sub_buf);
             break;
+        case UiPhase::UpToDate:
+            setVisible(v->badge_pill, true);
+            lv_label_set_text(v->lbl_badge, "已是最新");
+            lv_label_set_text(v->lbl_hero, ESPDECK_BUILD_VERSION);
+            lv_label_set_text(v->lbl_sub, "当前固件已是最新版本");
+            break;
     }
 
     // 3. Middle panel visibility & content
-    const bool show_idle = (phase == UiPhase::Idle || phase == UiPhase::Checking || phase == UiPhase::Error);
+    const bool show_idle = (phase == UiPhase::Idle || phase == UiPhase::Checking ||
+                            phase == UiPhase::Error || phase == UiPhase::UpToDate);
     const bool show_rel = (phase == UiPhase::Ready);
     const bool show_prog = (phase == UiPhase::Upgrading || phase == UiPhase::Done);
 
@@ -676,6 +692,11 @@ void refreshUi(lv_timer_t* t) {
         setVisible(v->btn_primary, true);
         lv_obj_set_pos(v->btn_primary, 32, 680);
         lv_label_set_text(v->lbl_primary, "检查更新");
+        setVisible(v->btn_secondary, false);
+    } else if (phase == UiPhase::UpToDate) {
+        setVisible(v->btn_primary, true);
+        lv_obj_set_pos(v->btn_primary, 32, 680);
+        lv_label_set_text(v->lbl_primary, "重新检查");
         setVisible(v->btn_secondary, false);
     } else if (phase == UiPhase::Ready) {
         setVisible(v->btn_primary, true);

@@ -54,7 +54,9 @@ def stage_release(
 
     digest = sha256_file(fw_dst)
     size = fw_dst.stat().st_size
-    ver = version or datetime.now().strftime("%Y.%m.%d-%H%M%S")
+    ver_file = profile.build_dir / ".espdeck_version"
+    built_ver = ver_file.read_text(encoding="utf-8").strip() if ver_file.is_file() else ""
+    ver = version or built_ver or datetime.now().strftime("%Y.%m.%d-%H%M%S")
     base = base_url.rstrip("/")
 
     manifest = {

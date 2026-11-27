@@ -171,7 +171,8 @@ def _write_ota_config_if_needed(output: Path, profile: DeviceProfile, apps: list
         return False
     ota_cfg = profile.raw.get("ota", {})
     remote_url = str(ota_cfg.get("remote_url", "")).rstrip("/")
-    ver = datetime.now().strftime("%Y.%m.%d")
+    ver = datetime.now().strftime("%Y.%m.%d-%H%M%S")
+    (output / ".espdeck_version").write_text(ver + "\n", encoding="utf-8")
 
     cfg_h = output / "main" / "espdeck_ota" / "espdeck_ota_config.h"
     content = (
