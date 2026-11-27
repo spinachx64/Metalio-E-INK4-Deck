@@ -83,14 +83,14 @@ struct OtaView {
     lv_obj_t* wifi_dot = nullptr;
     lv_obj_t* lbl_wifi = nullptr;
 
-    // Hero block
+    // Hero block (centered)
     lv_obj_t* emblem_box = nullptr;
     lv_obj_t* badge_pill = nullptr;
     lv_obj_t* lbl_badge = nullptr;
     lv_obj_t* lbl_hero = nullptr;
     lv_obj_t* lbl_sub = nullptr;
 
-    // Middle panels (mutually exclusive by phase)
+    // Centered middle panels (mutually exclusive by phase)
     lv_obj_t* panel_idle = nullptr;
     lv_obj_t* panel_release = nullptr;
     lv_obj_t* lbl_rel_size = nullptr;
@@ -101,10 +101,10 @@ struct OtaView {
     lv_obj_t* bar = nullptr;
     lv_obj_t* lbl_prog_hint = nullptr;
 
-    // Status message line (for errors / checking / notes)
+    // Status message line (centered)
     lv_obj_t* lbl_notice = nullptr;
 
-    // Bottom action dock
+    // Bottom action dock (centered)
     lv_obj_t* btn_primary = nullptr;
     lv_obj_t* lbl_primary = nullptr;
     lv_obj_t* btn_secondary = nullptr;
@@ -129,7 +129,6 @@ struct OtaView {
     std::string notice_text;
 
     int last_wifi_state = -1;
-    int last_rendered_phase = -1;
     std::string last_rendered_ver;
 
     ~OtaView() {
@@ -278,11 +277,10 @@ void doCheck(OtaView* v) {
         return;
     }
 
-    // Compare YYYY.MM.DD-HHMMSS lexicographically against running firmware version
     const std::string curr_ver = ESPDECK_BUILD_VERSION;
     if (ver <= curr_ver) {
         v->has_release.store(false);
-        setPhase(v, UiPhase::UpToDate, "当前固件已是最新版本，无需升级");
+        setPhase(v, UiPhase::UpToDate, "当前已是最新版本，无需升级");
         return;
     }
 
@@ -479,45 +477,30 @@ void workerTask(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// ---------- UI Builders (Editorial E-Ink Style) ----------
+// ---------- UI Builders (Centered Editorial E-Ink Style) ----------
 
-lv_obj_t* makeHairline(lv_obj_t* parent, int x, int y, int w, int h = 1) {
+lv_obj_t* makeCenteredRule(lv_obj_t* parent, int y, int w) {
     lv_obj_t* line = lv_obj_create(parent);
     lv_obj_remove_style_all(line);
-    lv_obj_set_pos(line, x, y);
-    lv_obj_set_size(line, w, h);
+    lv_obj_set_size(line, w, 1);
+    lv_obj_align(line, LV_ALIGN_TOP_MID, 0, y);
     lv_obj_set_style_bg_color(line, ColRule(), 0);
     lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
     return line;
 }
 
-lv_obj_t* makeSpecRow(lv_obj_t* parent, int y, const char* key, const char* val, lv_obj_t** out_val = nullptr) {
-    lv_obj_t* row = lv_obj_create(parent);
-    lv_obj_remove_style_all(row);
-    lv_obj_set_pos(row, 0, y);
-    lv_obj_set_size(row, 416, 54);
-    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* k = lv_label_create(row);
-    lv_label_set_text(k, key);
-    lv_obj_set_style_text_font(k, FontSmall(), 0);
-    lv_obj_set_style_text_color(k, ColMuted(), 0);
-    lv_obj_align(k, LV_ALIGN_LEFT_MID, 0, 0);
-
-    lv_obj_t* v = lv_label_create(row);
-    lv_label_set_text(v, val);
-    lv_obj_set_style_text_font(v, FontBody(), 0);
-    lv_obj_set_style_text_color(v, ColInk(), 0);
-    lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
-
-    makeHairline(row, 0, 53, 416, 1);
-
-    if (out_val) *out_val = v;
-    return row;
+lv_obj_t* makeCenteredLabel(lv_obj_t* parent, int y, const char* text, const lv_font_t* font, lv_color_t color) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_obj_set_width(lbl, 416);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, color, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, y);
+    return lbl;
 }
 
 void buildEmblem(lv_obj_t* box) {
-    // Crisp minimalist monochrome emblem: rounded square + geometric upward arrow + base tray
     static lv_point_precise_t shaft[] = {{34, 18}, {34, 44}};
     static lv_point_precise_t head[] = {{23, 29}, {34, 18}, {45, 29}};
     static lv_point_precise_t tray[] = {{20, 50}, {48, 50}};
@@ -547,7 +530,7 @@ void rebuildAppChips(lv_obj_t* wrap, const std::vector<std::string>& apps) {
         lv_obj_t* chip = lv_obj_create(wrap);
         lv_obj_remove_style_all(chip);
         lv_obj_set_size(chip, LV_SIZE_CONTENT, 32);
-        lv_obj_set_style_pad_hor(chip, 12, 0);
+        lv_obj_set_style_pad_hor(chip, 14, 0);
         lv_obj_set_style_pad_ver(chip, 4, 0);
         lv_obj_set_style_bg_color(chip, ColPaper(), 0);
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
@@ -605,7 +588,7 @@ void refreshUi(lv_timer_t* t) {
         sz = v->rel_size;
     }
 
-    // 2. Hero copy & badge
+    // 2. Hero copy & badge (all centered)
     char sub_buf[96];
     switch (phase) {
         case UiPhase::Idle:
@@ -616,8 +599,15 @@ void refreshUi(lv_timer_t* t) {
             break;
         case UiPhase::Checking:
             setVisible(v->badge_pill, false);
-            lv_label_set_text(v->lbl_hero, "检查更新中");
-            lv_label_set_text(v->lbl_sub, "正在同步云端版本清单");
+            lv_label_set_text(v->lbl_hero, "正在检查更新");
+            lv_label_set_text(v->lbl_sub, "正在同步云端版本信息");
+            break;
+        case UiPhase::UpToDate:
+            setVisible(v->badge_pill, true);
+            lv_label_set_text(v->lbl_badge, "已是最新");
+            lv_label_set_text(v->lbl_hero, "已是最新版本");
+            std::snprintf(sub_buf, sizeof(sub_buf), "当前版本  %s", ESPDECK_BUILD_VERSION);
+            lv_label_set_text(v->lbl_sub, sub_buf);
             break;
         case UiPhase::Ready:
             setVisible(v->badge_pill, true);
@@ -645,12 +635,6 @@ void refreshUi(lv_timer_t* t) {
             std::snprintf(sub_buf, sizeof(sub_buf), "当前版本  %s", ESPDECK_BUILD_VERSION);
             lv_label_set_text(v->lbl_sub, sub_buf);
             break;
-        case UiPhase::UpToDate:
-            setVisible(v->badge_pill, true);
-            lv_label_set_text(v->lbl_badge, "已是最新");
-            lv_label_set_text(v->lbl_hero, ESPDECK_BUILD_VERSION);
-            lv_label_set_text(v->lbl_sub, "当前固件已是最新版本");
-            break;
     }
 
     // 3. Middle panel visibility & content
@@ -665,8 +649,8 @@ void refreshUi(lv_timer_t* t) {
 
     if (show_rel && v->last_rendered_ver != ver) {
         v->last_rendered_ver = ver;
-        char sz_buf[32];
-        std::snprintf(sz_buf, sizeof(sz_buf), "%.2f MB", static_cast<double>(sz) / (1024.0 * 1024.0));
+        char sz_buf[48];
+        std::snprintf(sz_buf, sizeof(sz_buf), "固件大小  %.2f MB", static_cast<double>(sz) / (1024.0 * 1024.0));
         lv_label_set_text(v->lbl_rel_size, sz_buf);
         rebuildAppChips(v->apps_chips_wrap, apps);
     }
@@ -687,7 +671,7 @@ void refreshUi(lv_timer_t* t) {
         lv_label_set_text(v->lbl_notice, notice.c_str());
     }
 
-    // 5. Bottom action dock
+    // 5. Bottom action dock (centered)
     if (phase == UiPhase::Idle || phase == UiPhase::Error) {
         setVisible(v->btn_primary, true);
         lv_obj_set_pos(v->btn_primary, 32, 680);
@@ -705,18 +689,14 @@ void refreshUi(lv_timer_t* t) {
         setVisible(v->btn_secondary, true);
         lv_label_set_text(v->lbl_secondary, "重新检查");
     } else {
-        // Checking / Upgrading / Done: lock out actions cleanly
         setVisible(v->btn_primary, false);
         setVisible(v->btn_secondary, false);
     }
-
-    v->last_rendered_phase = static_cast<int>(phase);
 }
 
 }  // namespace
 
 lv_obj_t* EspdeckOtaScreen::Create() {
-    // Full-screen app: detach stale HomeScreen status widgets before resuming Wi-Fi
     if (auto* disp = LVAdapterDisplay::Instance()) {
         disp->BindStatusWidgets(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     }
@@ -750,7 +730,6 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_text_color(lbl_back, ColInk(), 0);
     lv_obj_align(lbl_back, LV_ALIGN_LEFT_MID, 8, 0);
 
-    // Right-aligned Wi-Fi pill
     lv_obj_t* wifi_row = lv_obj_create(scr);
     lv_obj_remove_style_all(wifi_row);
     lv_obj_set_size(wifi_row, LV_SIZE_CONTENT, 32);
@@ -773,13 +752,13 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_text_font(v->lbl_wifi, FontSmall(), 0);
     lv_obj_set_style_text_color(v->lbl_wifi, ColMuted(), 0);
 
-    makeHairline(scr, 32, 82, 416, 1);
+    makeCenteredRule(scr, 82, 416);
 
-    // ── Hero Block (y = 114..296) ────────────────────────────────────────────
+    // ── Hero Block (y = 116..316, centered) ──────────────────────────────────
     v->emblem_box = lv_obj_create(scr);
     lv_obj_remove_style_all(v->emblem_box);
     lv_obj_set_size(v->emblem_box, 68, 68);
-    lv_obj_align(v->emblem_box, LV_ALIGN_TOP_MID, 0, 114);
+    lv_obj_align(v->emblem_box, LV_ALIGN_TOP_MID, 0, 116);
     lv_obj_set_style_bg_color(v->emblem_box, ColPaper(), 0);
     lv_obj_set_style_bg_opa(v->emblem_box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(v->emblem_box, ColInk(), 0);
@@ -787,14 +766,14 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_radius(v->emblem_box, 18, 0);
     buildEmblem(v->emblem_box);
 
+    // Fixed-width centered pill so dynamic label updates never collapse/shift
     v->badge_pill = lv_obj_create(scr);
     lv_obj_remove_style_all(v->badge_pill);
-    lv_obj_set_size(v->badge_pill, LV_SIZE_CONTENT, 28);
-    lv_obj_align(v->badge_pill, LV_ALIGN_TOP_MID, 0, 198);
-    lv_obj_set_style_pad_hor(v->badge_pill, 14, 0);
+    lv_obj_set_size(v->badge_pill, 132, 32);
+    lv_obj_align(v->badge_pill, LV_ALIGN_TOP_MID, 0, 200);
     lv_obj_set_style_bg_color(v->badge_pill, ColInk(), 0);
     lv_obj_set_style_bg_opa(v->badge_pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(v->badge_pill, 14, 0);
+    lv_obj_set_style_radius(v->badge_pill, 16, 0);
     lv_obj_add_flag(v->badge_pill, LV_OBJ_FLAG_HIDDEN);
 
     v->lbl_badge = lv_label_create(v->badge_pill);
@@ -803,58 +782,44 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_text_color(v->lbl_badge, ColPaper(), 0);
     lv_obj_center(v->lbl_badge);
 
-    v->lbl_hero = lv_label_create(scr);
-    lv_obj_set_width(v->lbl_hero, 416);
-    lv_obj_set_style_text_align(v->lbl_hero, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(v->lbl_hero, FontHero(), 0);
-    lv_obj_set_style_text_color(v->lbl_hero, ColInk(), 0);
-    lv_obj_align(v->lbl_hero, LV_ALIGN_TOP_MID, 0, 236);
+    v->lbl_hero = makeCenteredLabel(scr, 244, "系统升级", FontHero(), ColInk());
+    v->lbl_sub = makeCenteredLabel(scr, 290, "", FontSmall(), ColMuted());
 
-    v->lbl_sub = lv_label_create(scr);
-    lv_obj_set_width(v->lbl_sub, 416);
-    lv_obj_set_style_text_align(v->lbl_sub, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(v->lbl_sub, FontSmall(), 0);
-    lv_obj_set_style_text_color(v->lbl_sub, ColMuted(), 0);
-    lv_obj_align(v->lbl_sub, LV_ALIGN_TOP_MID, 0, 280);
-
-    // ── Middle Panel A: Idle Spec List (y = 340..510) ────────────────────────
+    // ── Middle Panel A: Centered Device Spec (y = 346..520) ──────────────────
     v->panel_idle = lv_obj_create(scr);
     lv_obj_remove_style_all(v->panel_idle);
-    lv_obj_set_pos(v->panel_idle, 32, 340);
-    lv_obj_set_size(v->panel_idle, 416, 170);
+    lv_obj_set_pos(v->panel_idle, 32, 346);
+    lv_obj_set_size(v->panel_idle, 416, 174);
     lv_obj_remove_flag(v->panel_idle, LV_OBJ_FLAG_SCROLLABLE);
 
-    makeHairline(v->panel_idle, 0, 0, 416, 1);
-    makeSpecRow(v->panel_idle, 1,   "设备", "Metalio E-INK4");
-    makeSpecRow(v->panel_idle, 55,  "方式", "HTTPS 在线升级");
-    makeSpecRow(v->panel_idle, 109, "保护", "SHA-256 校验 · 双分区回滚");
+    makeCenteredRule(v->panel_idle, 0, 260);
+    makeCenteredLabel(v->panel_idle, 30,  "Metalio E-INK4", FontBody(), ColInk());
+    makeCenteredLabel(v->panel_idle, 74,  "HTTPS 在线升级", FontSmall(), ColMuted());
+    makeCenteredLabel(v->panel_idle, 108, "SHA-256 校验 · 双分区安全回滚", FontSmall(), ColMuted());
+    makeCenteredRule(v->panel_idle, 158, 260);
 
-    // ── Middle Panel B: Release Spec + App Chips (y = 340..540) ──────────────
+    // ── Middle Panel B: Centered Release Info + App Chips (y = 346..540) ─────
     v->panel_release = lv_obj_create(scr);
     lv_obj_remove_style_all(v->panel_release);
-    lv_obj_set_pos(v->panel_release, 32, 340);
-    lv_obj_set_size(v->panel_release, 416, 200);
+    lv_obj_set_pos(v->panel_release, 32, 346);
+    lv_obj_set_size(v->panel_release, 416, 194);
     lv_obj_remove_flag(v->panel_release, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(v->panel_release, LV_OBJ_FLAG_HIDDEN);
 
-    makeHairline(v->panel_release, 0, 0, 416, 1);
-    makeSpecRow(v->panel_release, 1, "固件大小", "-", &v->lbl_rel_size);
-
-    lv_obj_t* apps_title = lv_label_create(v->panel_release);
-    lv_label_set_text(apps_title, "包含应用");
-    lv_obj_set_style_text_font(apps_title, FontSmall(), 0);
-    lv_obj_set_style_text_color(apps_title, ColMuted(), 0);
-    lv_obj_set_pos(apps_title, 0, 74);
+    makeCenteredRule(v->panel_release, 0, 260);
+    v->lbl_rel_size = makeCenteredLabel(v->panel_release, 24, "固件大小  -", FontBody(), ColInk());
+    makeCenteredLabel(v->panel_release, 68, "包含应用", FontSmall(), ColMuted());
 
     v->apps_chips_wrap = lv_obj_create(v->panel_release);
     lv_obj_remove_style_all(v->apps_chips_wrap);
-    lv_obj_set_pos(v->apps_chips_wrap, 0, 108);
+    lv_obj_set_pos(v->apps_chips_wrap, 0, 100);
     lv_obj_set_size(v->apps_chips_wrap, 416, 86);
     lv_obj_set_flex_flow(v->apps_chips_wrap, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(v->apps_chips_wrap, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(v->apps_chips_wrap, 10, 0);
     lv_obj_set_style_pad_row(v->apps_chips_wrap, 10, 0);
 
-    // ── Middle Panel C: Focused Progress Module (y = 360..520) ───────────────
+    // ── Middle Panel C: Centered Progress Module (y = 360..520) ──────────────
     v->panel_progress = lv_obj_create(scr);
     lv_obj_remove_style_all(v->panel_progress);
     lv_obj_set_pos(v->panel_progress, 32, 360);
@@ -862,14 +827,10 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_remove_flag(v->panel_progress, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(v->panel_progress, LV_OBJ_FLAG_HIDDEN);
 
-    v->lbl_pct = lv_label_create(v->panel_progress);
-    lv_label_set_text(v->lbl_pct, "0%");
-    lv_obj_set_style_text_font(v->lbl_pct, FontHero(), 0);
-    lv_obj_set_style_text_color(v->lbl_pct, ColInk(), 0);
-    lv_obj_align(v->lbl_pct, LV_ALIGN_TOP_MID, 0, 0);
+    v->lbl_pct = makeCenteredLabel(v->panel_progress, 0, "0%", FontHero(), ColInk());
 
     v->bar = lv_bar_create(v->panel_progress);
-    lv_obj_set_size(v->bar, 416, 12);
+    lv_obj_set_size(v->bar, 360, 12);
     lv_obj_align(v->bar, LV_ALIGN_TOP_MID, 0, 56);
     lv_bar_set_range(v->bar, 0, 100);
     lv_obj_set_style_radius(v->bar, 6, 0);
@@ -879,24 +840,13 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_bg_color(v->bar, ColPaper(), 0);
     lv_obj_set_style_bg_color(v->bar, ColInk(), LV_PART_INDICATOR);
 
-    v->lbl_prog_hint = lv_label_create(v->panel_progress);
-    lv_obj_set_width(v->lbl_prog_hint, 416);
-    lv_obj_set_style_text_align(v->lbl_prog_hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(v->lbl_prog_hint, FontSmall(), 0);
-    lv_obj_set_style_text_color(v->lbl_prog_hint, ColMuted(), 0);
-    lv_obj_align(v->lbl_prog_hint, LV_ALIGN_TOP_MID, 0, 92);
+    v->lbl_prog_hint = makeCenteredLabel(v->panel_progress, 92, "", FontSmall(), ColMuted());
 
-    // ── Notice Line (y = 556) ────────────────────────────────────────────────
-    v->lbl_notice = lv_label_create(scr);
-    lv_obj_set_width(v->lbl_notice, 416);
-    lv_obj_set_style_text_align(v->lbl_notice, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(v->lbl_notice, FontSmall(), 0);
-    lv_obj_set_style_text_color(v->lbl_notice, ColInk(), 0);
-    lv_obj_align(v->lbl_notice, LV_ALIGN_TOP_MID, 0, 556);
+    // ── Notice Line (y = 556, centered) ──────────────────────────────────────
+    v->lbl_notice = makeCenteredLabel(scr, 556, "", FontSmall(), ColInk());
     lv_obj_add_flag(v->lbl_notice, LV_OBJ_FLAG_HIDDEN);
 
-    // ── Bottom Action Dock ───────────────────────────────────────────────────
-    // Primary solid-black CTA button
+    // ── Bottom Action Dock (centered) ────────────────────────────────────────
     v->btn_primary = lv_button_create(scr);
     lv_obj_set_size(v->btn_primary, 416, 64);
     lv_obj_set_pos(v->btn_primary, 32, 680);
@@ -923,7 +873,6 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_text_color(v->lbl_primary, ColPaper(), 0);
     lv_obj_center(v->lbl_primary);
 
-    // Secondary crisp outline button (shown only when a release is ready)
     v->btn_secondary = lv_button_create(scr);
     lv_obj_set_size(v->btn_secondary, 416, 52);
     lv_obj_set_pos(v->btn_secondary, 32, 704);
