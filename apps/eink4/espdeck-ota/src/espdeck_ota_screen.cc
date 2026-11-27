@@ -107,8 +107,6 @@ struct OtaView {
     // Bottom action dock (centered)
     lv_obj_t* btn_primary = nullptr;
     lv_obj_t* lbl_primary = nullptr;
-    lv_obj_t* btn_secondary = nullptr;
-    lv_obj_t* lbl_secondary = nullptr;
 
     lv_timer_t* ui_timer = nullptr;
 
@@ -427,7 +425,7 @@ void doUpgrade(OtaView* v) {
         for (auto& ch : exp_low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (exp_low != hex) {
             esp_ota_abort(ota_handle);
-            setPhase(v, UiPhase::Error, "SHA-256 校验失败，已取消升级");
+            setPhase(v, UiPhase::Error, "固件校验失败，已取消升级");
             ESP_LOGE(kTag, "SHA256 mismatch! expected=%s got=%s", exp_low.c_str(), hex);
             return;
         }
@@ -674,23 +672,15 @@ void refreshUi(lv_timer_t* t) {
     // 5. Bottom action dock (centered)
     if (phase == UiPhase::Idle || phase == UiPhase::Error) {
         setVisible(v->btn_primary, true);
-        lv_obj_set_pos(v->btn_primary, 32, 680);
         lv_label_set_text(v->lbl_primary, "检查更新");
-        setVisible(v->btn_secondary, false);
     } else if (phase == UiPhase::UpToDate) {
         setVisible(v->btn_primary, true);
-        lv_obj_set_pos(v->btn_primary, 32, 680);
         lv_label_set_text(v->lbl_primary, "重新检查");
-        setVisible(v->btn_secondary, false);
     } else if (phase == UiPhase::Ready) {
         setVisible(v->btn_primary, true);
-        lv_obj_set_pos(v->btn_primary, 32, 622);
         lv_label_set_text(v->lbl_primary, "立即升级");
-        setVisible(v->btn_secondary, true);
-        lv_label_set_text(v->lbl_secondary, "重新检查");
     } else {
         setVisible(v->btn_primary, false);
-        setVisible(v->btn_secondary, false);
     }
 }
 
@@ -785,18 +775,16 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     v->lbl_hero = makeCenteredLabel(scr, 244, "系统升级", FontHero(), ColInk());
     v->lbl_sub = makeCenteredLabel(scr, 290, "", FontSmall(), ColMuted());
 
-    // ── Middle Panel A: Centered Device Spec (y = 346..520) ──────────────────
+    // ── Middle Panel A: Centered Device Spec (y = 370..464) ──────────────────
     v->panel_idle = lv_obj_create(scr);
     lv_obj_remove_style_all(v->panel_idle);
-    lv_obj_set_pos(v->panel_idle, 32, 346);
-    lv_obj_set_size(v->panel_idle, 416, 174);
+    lv_obj_set_pos(v->panel_idle, 32, 370);
+    lv_obj_set_size(v->panel_idle, 416, 94);
     lv_obj_remove_flag(v->panel_idle, LV_OBJ_FLAG_SCROLLABLE);
 
-    makeCenteredRule(v->panel_idle, 0, 260);
-    makeCenteredLabel(v->panel_idle, 30,  "Metalio E-INK4", FontBody(), ColInk());
-    makeCenteredLabel(v->panel_idle, 74,  "HTTPS 在线升级", FontSmall(), ColMuted());
-    makeCenteredLabel(v->panel_idle, 108, "SHA-256 校验 · 双分区安全回滚", FontSmall(), ColMuted());
-    makeCenteredRule(v->panel_idle, 158, 260);
+    makeCenteredRule(v->panel_idle, 0, 220);
+    makeCenteredLabel(v->panel_idle, 32, "Metalio E-INK4", FontBody(), ColInk());
+    makeCenteredRule(v->panel_idle, 84, 220);
 
     // ── Middle Panel B: Centered Release Info + App Chips (y = 346..540) ─────
     v->panel_release = lv_obj_create(scr);
@@ -872,29 +860,6 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     lv_obj_set_style_text_font(v->lbl_primary, FontBodyBold(), 0);
     lv_obj_set_style_text_color(v->lbl_primary, ColPaper(), 0);
     lv_obj_center(v->lbl_primary);
-
-    v->btn_secondary = lv_button_create(scr);
-    lv_obj_set_size(v->btn_secondary, 416, 52);
-    lv_obj_set_pos(v->btn_secondary, 32, 704);
-    lv_obj_set_style_bg_color(v->btn_secondary, ColPaper(), 0);
-    lv_obj_set_style_bg_opa(v->btn_secondary, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(v->btn_secondary, ColInk(), 0);
-    lv_obj_set_style_border_width(v->btn_secondary, 1, 0);
-    lv_obj_set_style_radius(v->btn_secondary, 14, 0);
-    lv_obj_set_style_shadow_width(v->btn_secondary, 0, 0);
-    lv_obj_add_flag(v->btn_secondary, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(v->btn_secondary, [](lv_event_t*) {
-        if (!g_ota || g_ota->busy.load() || g_ota->pending_cmd.load() != 0) return;
-        g_ota->has_release.store(false);
-        setPhase(g_ota.get(), UiPhase::Checking, "正在重新检查...");
-        g_ota->pending_cmd.store(static_cast<int>(Cmd::Check));
-    }, LV_EVENT_CLICKED, nullptr);
-
-    v->lbl_secondary = lv_label_create(v->btn_secondary);
-    lv_label_set_text(v->lbl_secondary, "重新检查");
-    lv_obj_set_style_text_font(v->lbl_secondary, FontSmall(), 0);
-    lv_obj_set_style_text_color(v->lbl_secondary, ColInk(), 0);
-    lv_obj_center(v->lbl_secondary);
 
     // ── Background Worker + UI Timer ─────────────────────────────────────────
     auto* holder = new std::shared_ptr<OtaView>(v);
