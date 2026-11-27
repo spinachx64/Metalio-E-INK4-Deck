@@ -1,0 +1,21 @@
+{
+  "id": "usagi-badge",
+  "platform": "stopwatch",
+  "name": "Usagi",
+  "description": "Interactive 60 FPS Chiikawa Usagi electronic badge with ESP-NOW cross-screen portal",
+  "target_dir": "app_usagi",
+  "header": "app_usagi/app_usagi.h",
+  "class_name": "AppUsagi",
+  "source_root": "../../../../stopwatch-chiikawa/firmware/stopwatch_usagi",
+  "extra_sync": [
+    {
+      "from": "../../../../stopwatch-chiikawa/firmware/shared",
+      "to": "shared",
+      "files": [
+        "usagi_protocol.h",
+        "usagi_link.h",
+        "usagi_link.cpp"
+      ]
+    }
+  ]
+}

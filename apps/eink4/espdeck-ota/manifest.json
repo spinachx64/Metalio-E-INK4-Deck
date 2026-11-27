@@ -1,0 +1,18 @@
+{
+  "id": "espdeck-ota",
+  "platform": "eink4",
+  "name": "OTA",
+  "description": "ESPDeck dual-mode Wi-Fi OTA updater (LAN auto-discovery + remote HTTPS server)",
+  "target_dir": "espdeck_ota",
+  "header": "espdeck_ota_screen.h",
+  "icon_symbol": "espdeck_ota_app_icon",
+  "entry": "EspdeckOtaScreen::Create",
+  "source_root": "src",
+  "sources": [
+    "espdeck_ota_screen.cc",
+    "espdeck_ota_icon.c"
+  ],
+  "include_dirs": [
+    "."
+  ]
+}

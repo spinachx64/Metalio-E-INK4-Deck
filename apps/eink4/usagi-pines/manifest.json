@@ -1,0 +1,32 @@
+{
+  "id": "usagi-pines",
+  "platform": "eink4",
+  "name": "Usagi",
+  "description": "Cross-screen Usagi snowy pine forest gallery synced with StopWatch via ESP-NOW",
+  "target_dir": "usagi_badge",
+  "header": "usagi_screen.h",
+  "icon_symbol": "usagi_eink_app_icon",
+  "entry": "UsagiScreen::Create",
+  "source_root": "../../../../stopwatch-chiikawa/firmware/eink4_usagi",
+  "sources": [
+    "usagi_screen.cc",
+    "shared/usagi_link.cpp",
+    "assets/usagi_eink_assets.c"
+  ],
+  "include_dirs": [
+    ".",
+    "shared",
+    "assets"
+  ],
+  "extra_sync": [
+    {
+      "from": "../../../../stopwatch-chiikawa/firmware/shared",
+      "to": "shared",
+      "files": [
+        "usagi_protocol.h",
+        "usagi_link.h",
+        "usagi_link.cpp"
+      ]
+    }
+  ]
+}

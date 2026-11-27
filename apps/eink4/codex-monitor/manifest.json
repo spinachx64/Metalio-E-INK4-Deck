@@ -1,0 +1,26 @@
+{
+  "id": "codex-monitor",
+  "platform": "eink4",
+  "name": "Codex",
+  "description": "Codex & AGY quota desk monitor (standalone plugin mounted from ../ink4-codex-monitor)",
+  "target_dir": "codex_monitor",
+  "header": "codex_screen.h",
+  "icon_symbol": "codex_app_icon",
+  "entry": "CodexScreen::Create",
+  "source_root": "../../../../ink4-codex-monitor/firmware/codex_monitor",
+  "sources": [
+    "codex_screen.cc",
+    "ble/ble_nus.cpp",
+    "model/quota_state.cpp",
+    "model/agy_state.cpp",
+    "view/quota_view.cpp",
+    "view/agy_view.cpp",
+    "view/codex_icon.c"
+  ],
+  "source_globs": [
+    "fonts/codex_inter_*.c"
+  ],
+  "include_dirs": [
+    "."
+  ]
+}

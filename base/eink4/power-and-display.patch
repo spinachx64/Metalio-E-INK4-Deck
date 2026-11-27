@@ -1,0 +1,663 @@
+diff --git a/main/boards/common/audio/SimpleUart.hpp b/main/boards/common/audio/SimpleUart.hpp
+index 4eb27a3..7045a5e 100644
+--- a/main/boards/common/audio/SimpleUart.hpp
++++ b/main/boards/common/audio/SimpleUart.hpp
+@@ -4,6 +4,7 @@
+ #include <driver/uart.h>
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
++#include <freertos/queue.h>
+ #include <functional>
+ #include <vector>
+ #include <cstring>
+@@ -138,20 +139,7 @@ private:
+         end();
+     }
+ 
+-    // UART接收任务
+-    static void uartReceiveTask(void* arg) {
+-        SimpleUart* uart = static_cast<SimpleUart*>(arg);
+-        uint8_t buffer[RX_BUFFER_SIZE];
+-        
+-        while (true) {
+-            int length = uart_read_bytes(uart->m_uartNum, buffer, RX_BUFFER_SIZE - 1, pdMS_TO_TICKS(100));
+-            
+-            if (length > 0 && uart->m_callback) {
+-                std::vector<uint8_t> data(buffer, buffer + length);
+-                uart->m_callback(data);
+-            }
+-        }
+-    }
++    #include "power/uart_receive_task.inc"
+ 
+     // 常量定义
+     static constexpr size_t RX_BUFFER_SIZE = 1024;
+diff --git a/main/boards/common/bus/IOExpander.hpp b/main/boards/common/bus/IOExpander.hpp
+index 7ca55ec..91b75dd 100644
+--- a/main/boards/common/bus/IOExpander.hpp
++++ b/main/boards/common/bus/IOExpander.hpp
+@@ -2,6 +2,10 @@
+ #define IO_EXPANDER_HPP
+ 
+ #include <cstdint>
++#include <driver/gpio.h>
++#include "config.h"
++#include "power_policy.h"
++#include "power/background_policy.h"
+ #include <initializer_list>
+ 
+ #include <driver/i2c_master.h>
+@@ -261,7 +265,13 @@ private:
+         const TickType_t now = xTaskGetTickCount();
+         esp_err_t ret = ESP_OK;
+ 
+-        if (input_cache_valid_ && (now - input_cache_tick_) < kInputCacheTtlTicks) {
++        // Idle cache extends only while both volume keys are released
++        // and the shared interrupt is high. Any input transition brings back
++        // the original 20ms scan, including release and long-press handling.
++        const bool volume_pressed = (input_cache_value_ & ((1U << 7) | (1U << 8))) != ((1U << 7) | (1U << 8));
++        const auto ttl = pdMS_TO_TICKS(codex_power::input_cache_ms(
++            PowerPolicy::GetInstance().IsCodexIdle(), gpio_get_level(IO_EXPANDER_INT_GPIO) == 0, volume_pressed));
++        if (input_cache_valid_ && (now - input_cache_tick_) < ttl) {
+             *value = input_cache_value_;
+             ret = ESP_OK;
+         } else if (input_fail_until_ != 0 && now < input_fail_until_) {
+diff --git a/main/boards/common/power/cx25601n.cc b/main/boards/common/power/cx25601n.cc
+index 6ab8d6c..edc6746 100644
+--- a/main/boards/common/power/cx25601n.cc
++++ b/main/boards/common/power/cx25601n.cc
+@@ -4,6 +4,8 @@
+  */
+ 
+ #include "cx25601n.h"
++#include "power/background_policy.h"
++#include <esp_timer.h>
+ #include "power_policy.h"
+ 
+ #include "bq27220_gauge.h"
+@@ -117,13 +119,6 @@ esp_err_t set_vreg_hw_mv(uint32_t mv)
+     return err;
+ }
+ 
+-/** ibat：battery_get_bat_current()/10，单位约 µA 标度（1mA→1000） */
+-int32_t ibat_to_ma(int32_t ibat_scaled)
+-{
+-    int32_t ma = ibat_scaled / 1000;
+-    return ma > 0 ? ma : 0;
+-}
+-
+ void apply_vreg_fixed(uint32_t mv)
+ {
+     if (mv < CX25601N_VREG_MIN_MV) {
+@@ -146,94 +141,7 @@ void set_en_term(bool enable)
+     update_bits(REG_CHG_CTRL0, 0x01, 2, enable ? 1 : 0);
+ }
+ 
+-/** 低于截止电压且已终止时：关 EN_TERM、toggle EN_CHG 再开一轮 */
+-void kick_recharge(int32_t vbat, uint32_t vreg_target)
+-{
+-    ESP_LOGI(TAG, "recharge kick: vbat=%ldmV < VREG=%lumV",
+-             static_cast<long>(vbat), static_cast<unsigned long>(vreg_target));
+-
+-    apply_vreg_fixed(vreg_target);
+-
+-    xSemaphoreTake(s_lock, portMAX_DELAY);
+-    set_en_term(false);
+-    update_bits(REG_CHG_CTRL1, 0x01, 5, 0); /* EN_CHG off */
+-    update_bits(REG_CHG_CTRL1, 0x01, 4, 0); /* clear HIZ */
+-    xSemaphoreGive(s_lock);
+-
+-    vTaskDelay(pdMS_TO_TICKS(200));
+-
+-    xSemaphoreTake(s_lock, portMAX_DELAY);
+-    update_bits(REG_CHG_CTRL1, 0x01, 4, 0);
+-    update_bits(REG_CHG_CTRL1, 0x01, 5, 1); /* EN_CHG on */
+-    xSemaphoreGive(s_lock);
+-
+-    vTaskDelay(pdMS_TO_TICKS(500));
+-
+-    uint8_t stat = 0;
+-    const bool ok = (cx25601n_get_chrg_stat(&stat) == ESP_OK);
+-    ESP_LOGI(TAG, "recharge after: stat=%u (%s)",
+-             static_cast<unsigned>(stat),
+-             ok ? cx25601n_chrg_stat_str(stat) : "read fail");
+-}
+-
+-/** 固定 VREG；仅负责 EN_TERM 与低于截止时的再充 kick */
+-void charger_vreg_task(void *arg)
+-{
+-    (void)arg;
+-
+-    while (true) {
+-        const uint32_t vreg_target = s_vreg_vol_mv;
+-        const int32_t vbat_peek = battery_get_bat_voltage();
+-        const bool below_cutoff =
+-            (vreg_target >= CX25601N_VREG_MIN_MV && vreg_target <= CX25601N_VREG_MAX_MV &&
+-             vbat_peek >= 2500 && static_cast<uint32_t>(vbat_peek) < vreg_target);
+-        vTaskDelay(pdMS_TO_TICKS(below_cutoff ? 2000 : 10000));
+-
+-        if (vreg_target < CX25601N_VREG_MIN_MV || vreg_target > CX25601N_VREG_MAX_MV) {
+-            continue;
+-        }
+-
+-        apply_vreg_fixed(vreg_target);
+-
+-        const int32_t vbat = battery_get_bat_voltage();
+-        const int32_t ima = ibat_to_ma(battery_get_bat_current() / 10);
+-        uint8_t stat = 0;
+-        const bool have_stat = (cx25601n_get_chrg_stat(&stat) == ESP_OK);
+-        const bool idle = have_stat && (stat == CX25601N_CHG_STAT_NOT);
+-        const bool vbat_below =
+-            (vbat >= 2500 && static_cast<uint32_t>(vbat) < vreg_target);
+-
+-        char lp_probe[220];
+-        if (PowerPolicy::GetInstance().DebugFormatLpProbe(lp_probe, sizeof(lp_probe))) {
+-            ESP_LOGD(TAG, "lp_probe %s", lp_probe);
+-        }
+-
+-        /* 欠压保护：无输入且 VBAT≤3.1V → 写 0x18=0x01 关 BATFET */
+-        if (!s_uv_shutdown_done && vbat >= 2500 && vbat <= kUvBatfetShutdownMv) {
+-            uint8_t vbus = 0;
+-            const bool have_vbus = (cx25601n_get_vbus_stat(&vbus) == ESP_OK);
+-            if (have_vbus && vbus == 0) {
+-                ESP_LOGW(TAG, "UV protect: vbat=%ldmV → REG0x18=0x01 (BATFET shutdown)",
+-                         static_cast<long>(vbat));
+-                if (cx25601n_enter_batfet_shutdown() == ESP_OK) {
+-                    s_uv_shutdown_done = true;
+-                }
+-            }
+-        } else if (s_uv_shutdown_done && vbat > kUvBatfetShutdownMv + 100) {
+-            /* 电压回升后允许再次武装（例如插电充到更高后） */
+-            s_uv_shutdown_done = false;
+-        }
+-
+-        // 未到截止：关 EN_TERM；到了才允许按 ITERM 停充
+-        xSemaphoreTake(s_lock, portMAX_DELAY);
+-        set_en_term(!vbat_below);
+-        xSemaphoreGive(s_lock);
+-
+-        if (idle && ima < 5 && vbat_below) {
+-            kick_recharge(vbat, vreg_target);
+-        }
+-    }
+-}
++#include "power/charger_vreg_task.inc"
+ 
+ void unlock_private(bool enable)
+ {
+@@ -495,6 +403,7 @@ esp_err_t cx25601n_enable_charge(bool enable)
+         return ESP_ERR_INVALID_STATE;
+     }
+     xSemaphoreTake(s_lock, portMAX_DELAY);
++    ++s_charge_command_revision;
+     esp_err_t err = ESP_OK;
+     if (enable) {
+         err = update_bits(REG_CHG_CTRL1, 0x01, 4, 0); /* clear HIZ */
+@@ -531,6 +440,7 @@ esp_err_t cx25601n_enable_otg(bool enable)
+     }
+ 
+     xSemaphoreTake(s_lock, portMAX_DELAY);
++    ++s_charge_command_revision;
+     esp_err_t err = ESP_OK;
+ 
+     if (enable) {
+diff --git a/main/boards/common/power_policy/power_hw.h b/main/boards/common/power_policy/power_hw.h
+index aaf9a5c..4524104 100644
+--- a/main/boards/common/power_policy/power_hw.h
++++ b/main/boards/common/power_policy/power_hw.h
+@@ -57,6 +57,8 @@ esp_err_t power_hw_wifi_start(void);
+  * @return ESP_OK 成功；未开 CONFIG_PM_ENABLE 时返回 ESP_ERR_NOT_SUPPORTED
+  */
+ esp_err_t power_hw_cpu_freq_set(int mhz);
++// Automatic sleep is opted into only by the Codex idle policy.
++esp_err_t power_hw_cpu_mode_set(int mhz, bool auto_sleep);
+ 
+ /**
+  * @brief 启动硬关机任务（关 PA/保轨 → 关机图 → Deep Sleep → settle → 屏脚 park → PWR_KEY）
+diff --git a/main/boards/common/power_policy/power_hw.cc b/main/boards/common/power_policy/power_hw.cc
+index 011d6a1..4312592 100644
+--- a/main/boards/common/power_policy/power_hw.cc
++++ b/main/boards/common/power_policy/power_hw.cc
+@@ -319,21 +319,49 @@ esp_err_t power_hw_wifi_start(void)
+ }
+ 
+ esp_err_t power_hw_cpu_freq_set(int mhz)
++{
++    return power_hw_cpu_mode_set(mhz, false);
++}
++
++esp_err_t power_hw_cpu_mode_set(int mhz, bool auto_sleep)
+ {
+     #if CONFIG_PM_ENABLE
+     if (mhz < 10) {
+         mhz = 10;
+     }
++    // GPIO wake sources stay valid across automatic sleeps. Manual standby
++    // resets the wake mask itself; re-arm these on every Codex profile entry.
++    const gpio_num_t wake_pins[] = {TOUCH_INT_GPIO, BOOT_BUTTON_GPIO,
++                                    POWER_BUTTON_GPIO, IO_EXPANDER_INT_GPIO};
++    for (auto pin : wake_pins) {
++        const esp_err_t rc = auto_sleep ? gpio_wakeup_enable(pin, GPIO_INTR_LOW_LEVEL)
++                                       : gpio_wakeup_disable(pin);
++        if (rc != ESP_OK) return rc;
++    }
++    if (auto_sleep) {
++        // PM_SLP_DISABLE_GPIO would otherwise float EPD reset/chip-select and
++        // remove wake-pin pullups. Retain these pads' ordinary configuration.
++        const gpio_num_t retained[] = {EPD_PIN_RST, EPD_PIN_CS, EPD_PIN_DC,
++            EPD_PIN_MOSI, EPD_PIN_SCLK, I2C_SDA_PIN, I2C_SCL_PIN,
++            TOUCH_INT_GPIO, BOOT_BUTTON_GPIO, POWER_BUTTON_GPIO, IO_EXPANDER_INT_GPIO};
++        for (auto pin : retained) {
++            const esp_err_t rc = gpio_sleep_sel_dis(pin);
++            if (rc != ESP_OK) return rc;
++        }
++        const esp_err_t rc = esp_sleep_enable_gpio_wakeup();
++        if (rc != ESP_OK) return rc;
++    }
+     esp_pm_config_t cfg = {
+         .max_freq_mhz = mhz,
+-        .min_freq_mhz = mhz,
+-        .light_sleep_enable = false,
++        .min_freq_mhz = auto_sleep ? 40 : mhz,
++        .light_sleep_enable = auto_sleep,
+     };
+     esp_err_t err = esp_pm_configure(&cfg);
+-    ESP_LOGD(TAG, "cpu %dMHz (no auto_ls): %s", mhz, esp_err_to_name(err));
++    ESP_LOGI(TAG, "cpu max=%d min=%d auto_ls=%d: %s", mhz, cfg.min_freq_mhz, auto_sleep, esp_err_to_name(err));
+     return err;
+     #else
+     (void)mhz;
++    (void)auto_sleep;
+     ESP_LOGW(TAG, "cpu freq skipped (CONFIG_PM_ENABLE off)");
+     return ESP_ERR_NOT_SUPPORTED;
+     #endif
+diff --git a/main/boards/common/power_policy/power_policy.h b/main/boards/common/power_policy/power_policy.h
+index 80dcf31..219ee2f 100644
+--- a/main/boards/common/power_policy/power_policy.h
++++ b/main/boards/common/power_policy/power_policy.h
+@@ -32,6 +32,7 @@ enum class PowerNeed : uint8_t {
+     UiKeepNet,     // 翻译页保网满频；本页不参与 PA_en
+     UsbVirtualDisk, // 虚拟 U 盘启用：不计无操作进待机（不硬占网）
+     StandbyInhibit, // 产测老化等：禁止无操作进待机；不硬占网、不驱动 PA（PA 仍靠 DeviceState）
++    CodexMonitor, // Display stays visible; allow automatic light sleep only while idle.
+     kCount
+ };
+ 
+@@ -73,6 +74,7 @@ public:
+ 
+     /** 触摸芯片是否已深睡（待机 LP）；touch_feed 须跳过 I2C 读以免刷屏报错 */
+     bool IsTouchAsleep() const;
++    bool DebugFormatCodexPower(char* buf, size_t len);
+ 
+     /**
+      * @brief 请求立即重算电源档位
+@@ -94,6 +96,7 @@ public:
+      * @return 80 / 160 / 240
+      */
+     int GetIdleCpuMhz() const;
++    bool IsCodexIdle() const;
+ 
+     /**
+      * @brief 设置 AppIdle 目标 CPU 频率并写入 NVS
+diff --git a/main/boards/common/power_policy/power_policy.cc b/main/boards/common/power_policy/power_policy.cc
+index c96596a..1f292dd 100644
+--- a/main/boards/common/power_policy/power_policy.cc
++++ b/main/boards/common/power_policy/power_policy.cc
+@@ -1,4 +1,5 @@
+ #include "power_policy.h"
++#include "power/idle_profile.h"
+ 
+ #include "battery_uv_lockout.h"
+ #include "power_policy_priv.h"
+@@ -30,6 +31,7 @@
+ #include <cstring>
+ 
+ static const char* TAG = "PowerPolicy";
++static std::atomic<bool> s_codex_background_idle{false};
+ 
+ static std::atomic<const char*> s_lp_phase{"boot"}; // 待机 LP 阶段字面量
+ static std::atomic<uint32_t> s_lp_phase_ms{0};      // 进入该阶段的毫秒戳
+@@ -176,7 +178,7 @@ bool UserInactiveLongEnoughLocked()
+         return false;
+     }
+     // 虚拟 U 盘 / 显式禁待机：禁止无操作进待机（PC 挂载或产测老化可能长时间无触摸）
+-    if (NeedHeld(PowerNeed::UsbVirtualDisk) || NeedHeld(PowerNeed::StandbyInhibit)) {
++    if (NeedHeld(PowerNeed::UsbVirtualDisk) || NeedHeld(PowerNeed::StandbyInhibit) || NeedHeld(PowerNeed::CodexMonitor)) {
+         return false;
+     }
+     if (pwr::last_user_activity_us == 0) {
+@@ -419,7 +421,7 @@ void CpuFreqAsyncCb(void* /*arg*/)
+     s_cpu_freq_async_queued.store(false, std::memory_order_release);
+     const int mhz = s_cpu_mhz_pending.exchange(0);
+     if (mhz != 0) {
+-        power_hw_cpu_freq_set(mhz);
++        power_hw_cpu_mode_set(mhz < 0 ? -mhz : mhz, mhz < 0);
+     }
+     if (s_cpu_mhz_pending.load() != 0 &&
+         !s_cpu_freq_async_queued.exchange(true, std::memory_order_acq_rel)) {
+@@ -494,7 +496,7 @@ void FlushCpuFreqOutsideLock()
+         if (!esp_lv_adapter_is_initialized()) {
+             const int mhz = s_cpu_mhz_pending.exchange(0);
+             if (mhz != 0) {
+-                power_hw_cpu_freq_set(mhz);
++                power_hw_cpu_mode_set(mhz < 0 ? -mhz : mhz, mhz < 0);
+             }
+         } else if (!s_cpu_freq_async_queued.exchange(true, std::memory_order_acq_rel)) {
+             if (!ScreenLvAsync(CpuFreqAsyncCb)) {
+@@ -587,6 +589,15 @@ void ApplyLocked(Mode next)
+         return;
+     }
+ 
++    // A negative queue value encodes the Codex-only automatic sleep profile.
++    // Queue before the same-mode fast path: activity can change without a mode change.
++    const bool codex_idle = codex_power::allow_auto_sleep(
++        NeedHeld(PowerNeed::CodexMonitor), next == Mode::AppIdle,
++        NeedHeld(PowerNeed::UsbVirtualDisk) || NeedHeld(PowerNeed::StandbyInhibit), InactiveUsLocked());
++    s_codex_background_idle.store(codex_idle, std::memory_order_relaxed);
++    const int cpu_request = codex_idle ? -80 :
++        (next == Mode::AppIdle ? idle_cpu_mhz : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
++    QueueCpuMhzLocked(cpu_request);
+     const Mode prev = mode;
+     // 仅待机掉 MAIN_PWR；AppIdle（保网到期）只停网/降频，不停外设总电源
+     const bool want_main_rail_off = (next == Mode::StandbyUi && StandbyScreen::IsActive());
+@@ -636,7 +647,6 @@ void ApplyLocked(Mode next)
+         WakeTouchLocked();
+     }
+ 
+-    const int want_mhz = (next == Mode::AppIdle) ? idle_cpu_mhz : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+     const bool want_pa =
+         !NeedHeld(PowerNeed::UiKeepNet) &&
+         ((next == Mode::Full) || (next == Mode::NetActive && DeviceWantsPa(device_state)));
+@@ -645,7 +655,6 @@ void ApplyLocked(Mode next)
+         (next == Mode::AppIdle) ||
+         (next == Mode::StandbyUi && StandbyScreen::IsActive());
+ 
+-    QueueCpuMhzLocked(want_mhz);
+ 
+     if (!NeedHeld(PowerNeed::UiKeepNet)) {
+         power_hw_pa_set(want_pa);
+@@ -810,7 +819,7 @@ void PowerPolicy::Release(PowerNeed need)
+     xSemaphoreTake(pwr::mu, portMAX_DELAY);
+     const bool hard_before = NeedsHardNetActiveLocked();
+     const bool usb_before = NeedHeld(PowerNeed::UsbVirtualDisk);
+-    const bool inhibit_before = NeedHeld(PowerNeed::StandbyInhibit);
++    const bool inhibit_before = NeedHeld(PowerNeed::StandbyInhibit) || NeedHeld(PowerNeed::CodexMonitor);
+     uint8_t& ref = pwr::need_ref[static_cast<int>(need)];
+     if (ref > 0) {
+         --ref;
+@@ -818,7 +827,7 @@ void PowerPolicy::Release(PowerNeed need)
+     // 硬占网 / 虚拟 U 盘 / 禁待机解除后刷新无操作计时，避免立刻进待机
+     if ((hard_before && !NeedsHardNetActiveLocked()) ||
+         (usb_before && !NeedHeld(PowerNeed::UsbVirtualDisk)) ||
+-        (inhibit_before && !NeedHeld(PowerNeed::StandbyInhibit))) {
++        (inhibit_before && !NeedHeld(PowerNeed::StandbyInhibit) && !NeedHeld(PowerNeed::CodexMonitor))) {
+         pwr::last_user_activity_us = esp_timer_get_time();
+     }
+     pwr::ReevaluateLocked();
+@@ -865,7 +874,28 @@ void PowerPolicy::NotifyUserActivity()
+ 
+     pwr::last_user_activity_us = now;
+     pwr::ClearNetGraceLocked();
++    if (NeedHeld(PowerNeed::CodexMonitor)) pwr::ReevaluateLocked();
+     xSemaphoreGive(pwr::mu);
++    pwr::FlushCpuFreqOutsideLock();
++}
++
++bool PowerPolicy::IsCodexIdle() const
++{
++    return s_codex_background_idle.load(std::memory_order_relaxed);
++}
++
++bool PowerPolicy::DebugFormatCodexPower(char* buf, size_t len)
++{
++    if (!pwr::mu || xSemaphoreTake(pwr::mu, pdMS_TO_TICKS(20)) != pdTRUE) return false;
++    snprintf(buf, len, "mode=%s cpu_request=%d wifi_paused=%d touch_asleep=%d needs=",
++             pwr::ModeName(pwr::mode), pwr::queued_cpu_mhz,
++             pwr::wifi_stopped_by_policy, pwr::touch_asleep);
++    size_t used = strlen(buf);
++    for (int i = 0; i < static_cast<int>(PowerNeed::kCount) && used < len; ++i) {
++        if (pwr::need_ref[i]) used += snprintf(buf + used, len - used, "%d:%u,", i, pwr::need_ref[i]);
++    }
++    xSemaphoreGive(pwr::mu);
++    return true;
+ }
+ 
+ bool PowerPolicy::IsTouchAsleep() const
+diff --git a/main/boards/metalio-e-ink-4/display/esp_lcd_panel_ssd1677.c b/main/boards/metalio-e-ink-4/display/esp_lcd_panel_ssd1677.c
+index f0dda11..83ac8e5 100644
+--- a/main/boards/metalio-e-ink-4/display/esp_lcd_panel_ssd1677.c
++++ b/main/boards/metalio-e-ink-4/display/esp_lcd_panel_ssd1677.c
+@@ -486,13 +486,28 @@ static esp_err_t epaper_panel_draw_bitmap(esp_lcd_panel_t *panel, int x_start, i
+         } else {
+             ESP_RETURN_ON_FALSE(buffer_size <= SSD1677_PANEL_BUFFER_SIZE, ESP_ERR_INVALID_SIZE, TAG,
+                                 "bitmap too large");
++            // A full 48KB internal bounce conflicts with BLE and I2S DMA.
++            // Polling SPI transactions finish before this 4KB buffer is reused.
++            enum { BOUNCE_BYTES = 4096 };
+             if (!epaper_panel->_framebuffer) {
+-                epaper_panel->_framebuffer =
+-                    heap_caps_malloc(SSD1677_PANEL_BUFFER_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+-                ESP_RETURN_ON_FALSE(epaper_panel->_framebuffer, ESP_ERR_NO_MEM, TAG, "dma bounce alloc failed");
++                epaper_panel->_framebuffer = heap_caps_malloc(BOUNCE_BYTES,
++                    MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
++                ESP_RETURN_ON_FALSE(epaper_panel->_framebuffer, ESP_ERR_NO_MEM,
++                                    TAG, "dma bounce alloc failed");
+             }
+-            memcpy(epaper_panel->_framebuffer, color_data, buffer_size);
+-            tx_buf = epaper_panel->_framebuffer;
++            const uint8_t command = (epaper_panel->bitmap_color == SSD1677_EPAPER_BITMAP_PREVIOUS)
++                ? SSD1677_CMD_WRITE_RED_VRAM : SSD1677_CMD_WRITE_BW_VRAM;
++            for (size_t offset = 0; offset < (size_t)buffer_size;) {
++                size_t length = (size_t)buffer_size - offset;
++                if (length > BOUNCE_BYTES) length = BOUNCE_BYTES;
++                memcpy(epaper_panel->_framebuffer, (const uint8_t*)color_data + offset, length);
++                // -1 sends data only: the panel's VRAM address counter continues.
++                ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(epaper_panel->io,
++                    offset == 0 ? command : -1, epaper_panel->_framebuffer, length),
++                    TAG, "chunked VRAM write failed");
++                offset += length;
++            }
++            return ESP_OK;
+         }
+     } else {
+         process_bitmap(panel, w_draw, h_draw, src_stride, dst_stride, color_data);
+diff --git a/main/boards/metalio-e-ink-4/periph/metalio_board_periph.cc b/main/boards/metalio-e-ink-4/periph/metalio_board_periph.cc
+index 6a3ac58..b5bd340 100644
+--- a/main/boards/metalio-e-ink-4/periph/metalio_board_periph.cc
++++ b/main/boards/metalio-e-ink-4/periph/metalio_board_periph.cc
+@@ -1,4 +1,6 @@
+ #include "metalio_board_periph.h"
++#include "power_policy.h"
++#include "power/background_policy.h"
+ 
+ #include "bq27220_gauge.h"
+ #include "config.h"
+@@ -136,13 +138,15 @@ void MetalioPeriph_StartSystemMonitor() {
+             uint64_t last_loop_end_us = 0;
+ 
+             while (true) {
+-                vTaskDelay(pdMS_TO_TICKS(3000));
++                const unsigned monitor_period = codex_power::monitor_period_ms(
++                    PowerPolicy::GetInstance().IsCodexIdle());
++                vTaskDelay(pdMS_TO_TICKS(monitor_period));
+ 
+                 const uint64_t now_us = static_cast<uint64_t>(esp_timer_get_time());
+                 if (last_loop_end_us != 0) {
+                     const uint64_t gap_us = now_us - last_loop_end_us;
+                     // 期望 ~3000ms；明显偏大说明 sys_mon(pri=1) 长期得不到 CPU
+-                    if (gap_us > 7500000) {
++                    if (gap_us > static_cast<uint64_t>(monitor_period) * 1000 + 4500000) {
+                         ESP_LOGW("系统监控",
+                                  "@@@调度  | sys_mon 实际间隔 %lu ms (期望 ~3000ms)",
+                                  static_cast<unsigned long>(gap_us / 1000));
+diff --git a/main/display/lv_adapter_display.h b/main/display/lv_adapter_display.h
+index 966261f..36458c0 100644
+--- a/main/display/lv_adapter_display.h
++++ b/main/display/lv_adapter_display.h
+@@ -103,6 +103,7 @@ public:
+ 
+     // CST816 硬件 RST 唤醒后，通知 esp_lv_adapter 重新读触摸（IRQ 路径）。
+     void KickTouchInput();
++    void SetCodexInputIdle(bool idle);
+ 
+ private:
+     bool Lock(int timeout_ms = 0) override;
+diff --git a/main/display/lv_adapter_display.cc b/main/display/lv_adapter_display.cc
+index 1bec55a..0183342 100644
+--- a/main/display/lv_adapter_display.cc
++++ b/main/display/lv_adapter_display.cc
+@@ -1,3 +1,4 @@
++#include "codex_monitor/ble/ble_nus.h"
+ #include "lv_adapter_display.h"
+ 
+ #include <cstdio>
+@@ -214,6 +215,17 @@ TouchFeedSnapshot s_touch_snap{};
+ TaskHandle_t s_touch_feed_task = nullptr;
+ volatile bool s_touch_feed_run = false;
+ esp_lcd_touch_handle_t s_touch_tp = nullptr;
++esp_lcd_touch_interrupt_callback_t s_touch_adapter_irq = nullptr;
++bool s_touch_irq_ready = false;
++
++void TouchFeedInterrupt(esp_lcd_touch_handle_t tp) {
++    // Preserve the adapter's own semaphore/IRQ handling.
++    if (s_touch_adapter_irq) s_touch_adapter_irq(tp);
++    BaseType_t wake = pdFALSE;
++    if (s_touch_feed_task) vTaskNotifyGiveFromISR(s_touch_feed_task, &wake);
++    if (wake) portYIELD_FROM_ISR();
++}
++bool s_codex_input_idle = false; // Protected by the recursive LVGL lock.
+ bool s_standby_background_paused = false;
+ 
+ const TouchVirtualKey* HitVirtualKey(int x, int y) {
+@@ -452,7 +464,12 @@ void TouchFeedTask(void* arg) {
+     esp_lcd_touch_point_data_t pts[1] = {};
+     ESP_LOGD(TAG, "touch_feed start prio=%u period=%dms", static_cast<unsigned>(kTouchFeedPriority),
+              kTouchFeedPeriodMs);
++    TickType_t wait = portMAX_DELAY;
+     while (s_touch_feed_run) {
++        // No periodic I2C reads without a touch. Poll only during an active
++        // gesture, including a final release sample for virtual-key long presses.
++        ulTaskNotifyTake(pdTRUE, wait);
++        if (!s_touch_feed_run) break;
+         uint8_t count = 0;
+         // 待机 LP 已写 A5 深睡：勿再 I2C 读（CST816S 不应答 → panel_io 刷 E 级日志）
+         if (tp != nullptr && !PowerPolicy::GetInstance().IsTouchAsleep()) {
+@@ -465,7 +482,7 @@ void TouchFeedTask(void* arg) {
+         const int x = count > 0 ? static_cast<int>(pts[0].x) : 0;
+         const int y = count > 0 ? static_cast<int>(pts[0].y) : 0;
+         TouchFeedHandleSample(count, x, y);
+-        vTaskDelay(pdMS_TO_TICKS(kTouchFeedPeriodMs));
++        wait = (count || !s_touch_irq_ready) ? pdMS_TO_TICKS(kTouchFeedPeriodMs) : portMAX_DELAY;
+     }
+     s_touch_feed_task = nullptr;
+     vTaskDelete(nullptr);
+@@ -482,7 +499,14 @@ void StartTouchFeed(esp_lcd_touch_handle_t tp) {
+         s_touch_feed_run = false;
+         s_touch_feed_task = nullptr;
+         ESP_LOGE(TAG, "touch_feed create failed");
++        return;
+     }
++    s_touch_adapter_irq = tp->config.interrupt_callback;
++    s_touch_irq_ready = esp_lcd_touch_register_interrupt_callback(tp, TouchFeedInterrupt) == ESP_OK;
++    if (!s_touch_irq_ready) {
++        ESP_LOGE(TAG, "touch IRQ registration failed; falling back to polling");
++    }
++    xTaskNotifyGive(s_touch_feed_task); // Drain a touch already present at startup.
+ }
+ 
+ void StopTouchFeed() {
+@@ -490,6 +514,8 @@ void StopTouchFeed() {
+         return;
+     }
+     s_touch_feed_run = false;
++    esp_lcd_touch_register_interrupt_callback(s_touch_tp, s_touch_adapter_irq);
++    xTaskNotifyGive(s_touch_feed_task); // Release a task blocked indefinitely on IRQ.
+     for (int i = 0; i < 50 && s_touch_feed_task != nullptr; ++i) {
+         vTaskDelay(pdMS_TO_TICKS(20));
+     }
+@@ -581,6 +607,9 @@ esp_err_t CustomTouchRead(esp_lcd_touch_handle_t tp, esp_lcd_touch_point_data_t*
+     (void)lvgl_d_after;
+ #endif
+ 
++    if (auto* disp = LVAdapterDisplay::Instance()) {
++        disp->SetCodexInputIdle(s_codex_input_idle);
++    }
+     if (kick_again) {
+         if (auto* disp = LVAdapterDisplay::Instance()) {
+             disp->KickTouchInput();
+@@ -1479,6 +1508,7 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
+     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
+     adapter_cfg.task_stack_size = 16 * 1024;
+     adapter_cfg.task_max_delay_ms = 1000;
++    adapter_cfg.tick_period_ms = 1000; // Time comes from esp_timer, not a 1ms tick. app integration
+     // PSRAM 栈上禁止调用 spi_flash/NVS（会触发 cache_utils assert）。
+     // 业务里凡 EnsureAudioServiceRunning / Settings 等须放到 DRAM 栈任务（参见录音/翻译）。
+     adapter_cfg.stack_in_psram = true;
+@@ -1486,6 +1516,7 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
+     adapter_cfg.task_core_id = 1;
+ 
+     ESP_ERROR_CHECK(esp_lv_adapter_init(&adapter_cfg));
++    lv_tick_set_cb([]() -> uint32_t { return static_cast<uint32_t>(esp_timer_get_time() / 1000); });
+     ESP_ERROR_CHECK(esp_lv_adapter_set_default_display_idf_callback_registration_enabled(false));
+ 
+     // ROTATE_0：adapter 原样交出 I1；逻辑→面板旋转由 DisplayUi / OverlayDirty 做
+@@ -1522,6 +1553,10 @@ LVAdapterDisplay::LVAdapterDisplay(const esp_lcd_panel_handle_t panel,
+         StartTouchFeed(touch_handle);
+     }
+ 
++    // Prepare shared BLE memory before the first EPD DMA allocation.
++    // No advertising or application launch on boot.
++    ble_nus::prepare("Codex Ink");
++
+     ESP_ERROR_CHECK(esp_lv_adapter_start());
+ 
+     const mmap_assets_config_t mmap_cfg = {
+@@ -1573,11 +1608,7 @@ void LVAdapterDisplay::SetupUI() {
+     EpdCommitBootBaseline(epd_flush_ctx_);
+ }
+ 
+-void LVAdapterDisplay::KickTouchInput() {
+-    if (touch_indev_ != nullptr) {
+-        esp_lv_adapter_touch_notify_interrupt(touch_indev_);
+-    }
+-}
++#include "power/touch_input_idle.inc"
+ 
+ bool LVAdapterDisplay::TryGetResource(const char* name, const uint8_t** mem, size_t* size) const {
+     if (name == nullptr || name[0] == '\0' || mem == nullptr || size == nullptr) {
+diff --git a/main/display/screen/home_screen/home_apps_slash.cc b/main/display/screen/home_screen/home_apps_slash.cc
+index 11da189..d3475ce 100644
+--- a/main/display/screen/home_screen/home_apps_slash.cc
++++ b/main/display/screen/home_screen/home_apps_slash.cc
+@@ -33,6 +33,9 @@
+             ESP_LOGW(TAG, "slash apps skip h=%d", static_cast<int>(Home_slash_apps_h));
+             return;
+         }
++        const int pages = Home_PageCount();
++        if (Home_page < 0) Home_page = 0;
++        if (Home_page >= pages) Home_page = pages - 1;
+         lv_obj_clean(Home_apps);
+         const lv_coord_t inner_h =
+             Home_slash_apps_h - HOME_SLASH_ROW_GAP * (HOME_SLASH_ROWS - 1);
+@@ -50,7 +53,7 @@
+             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+             lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+ 
+-            const int base = r * 2;
++            const int base = Home_page * HOME_SLASH_ROWS * 2 + r * 2;
+             if (base < kSlashAppCount)
+             {
+                 Home_CreateSlashAppCell(row, kSlashApps[base], r, 0, row_h, cell_w);
+@@ -62,7 +65,11 @@
+         }
+         if (Home_page_lbl != nullptr)
+         {
+-            lv_obj_add_flag(Home_page_lbl, LV_OBJ_FLAG_HIDDEN);
++            char text[32];
++            std::snprintf(text, sizeof(text), "%d / %d", Home_page + 1, pages);
++            lv_label_set_text(Home_page_lbl, text);
++            if (pages > 1) lv_obj_clear_flag(Home_page_lbl, LV_OBJ_FLAG_HIDDEN);
++            else lv_obj_add_flag(Home_page_lbl, LV_OBJ_FLAG_HIDDEN);
+         }
+         ESP_LOGD(TAG, "slash apps %d row_h=%d cell_w=%d", kSlashAppCount, static_cast<int>(row_h),
+                  static_cast<int>(cell_w));
