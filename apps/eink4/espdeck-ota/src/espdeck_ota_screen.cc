@@ -16,6 +16,7 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 #include <mbedtls/sha256.h>
@@ -64,7 +65,7 @@ struct OtaView {
     std::atomic<int> progress{0};
     std::atomic<bool> ui_dirty{true};
 
-    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+    SemaphoreHandle_t lock = nullptr;
     std::string lan_url = ESPDECK_OTA_LAN_URL;
     std::string remote_url = ESPDECK_OTA_REMOTE_URL;
     std::string rel_version;
@@ -85,18 +86,31 @@ const lv_font_t* UiFont() {
     return f ? f : LV_FONT_DEFAULT;
 }
 
+struct LockGuard {
+    SemaphoreHandle_t h;
+    explicit LockGuard(SemaphoreHandle_t s) : h(s) {
+        if (h) xSemaphoreTake(h, portMAX_DELAY);
+    }
+    ~LockGuard() {
+        if (h) xSemaphoreGive(h);
+    }
+};
+
 void setStatus(OtaView* v, const std::string& msg) {
-    portENTER_CRITICAL(&v->mux);
-    v->status_text = msg;
-    portEXIT_CRITICAL(&v->mux);
+    {
+        LockGuard g(v->lock);
+        v->status_text = msg;
+    }
     v->ui_dirty.store(true);
 }
 
 std::string activeBaseUrl(OtaView* v) {
     const bool is_lan = (v->mode.load() == static_cast<int>(SourceMode::Lan));
-    portENTER_CRITICAL(&v->mux);
-    std::string url = is_lan ? v->lan_url : v->remote_url;
-    portEXIT_CRITICAL(&v->mux);
+    std::string url;
+    {
+        LockGuard g(v->lock);
+        url = is_lan ? v->lan_url : v->remote_url;
+    }
     while (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
@@ -231,14 +245,15 @@ void doCheck(OtaView* v) {
         return;
     }
 
-    portENTER_CRITICAL(&v->mux);
-    v->rel_version = ver;
-    v->rel_sha256 = sha;
-    v->rel_bin_url = bin_url;
-    v->rel_apps = apps_str;
-    v->rel_notes = notes;
-    v->rel_size = size;
-    portEXIT_CRITICAL(&v->mux);
+    {
+        LockGuard g(v->lock);
+        v->rel_version = ver;
+        v->rel_sha256 = sha;
+        v->rel_bin_url = bin_url;
+        v->rel_apps = apps_str;
+        v->rel_notes = notes;
+        v->rel_size = size;
+    }
 
     v->has_release.store(true);
     setStatus(v, "发现可用固件，点击「立即升级」开始");
@@ -254,11 +269,15 @@ void doUpgrade(OtaView* v) {
         return;
     }
 
-    portENTER_CRITICAL(&v->mux);
-    const std::string bin_url = v->rel_bin_url;
-    const std::string expected_sha = v->rel_sha256;
-    const size_t expected_size = v->rel_size;
-    portEXIT_CRITICAL(&v->mux);
+    std::string bin_url;
+    std::string expected_sha;
+    size_t expected_size = 0;
+    {
+        LockGuard g(v->lock);
+        bin_url = v->rel_bin_url;
+        expected_sha = v->rel_sha256;
+        expected_size = v->rel_size;
+    }
 
     const esp_partition_t* update_part = esp_ota_get_next_update_partition(nullptr);
     if (!update_part) {
@@ -445,12 +464,13 @@ void workerTask(void* arg) {
                         discovered.pop_back();
                     }
                     bool changed = false;
-                    portENTER_CRITICAL(&v->mux);
-                    if (!discovered.empty() && v->lan_url != discovered) {
-                        v->lan_url = discovered;
-                        changed = true;
+                    {
+                        LockGuard g(v->lock);
+                        if (!discovered.empty() && v->lan_url != discovered) {
+                            v->lan_url = discovered;
+                            changed = true;
+                        }
                     }
-                    portEXIT_CRITICAL(&v->mux);
                     if (changed) {
                         ESP_LOGI(kTag, "Discovered LAN OTA server: %s", discovered.c_str());
                         setStatus(v, "已自动发现局域网 OTA 服务");
@@ -501,12 +521,15 @@ void refreshUi(lv_timer_t* t) {
     const std::string base = activeBaseUrl(v);
     lv_label_set_text(v->lbl_url, base.empty() ? "地址: 未发现 / 未配置" : ("地址: " + base).c_str());
 
-    portENTER_CRITICAL(&v->mux);
-    const std::string status = v->status_text;
-    const std::string ver = v->rel_version;
-    const std::string apps = v->rel_apps;
-    const size_t sz = v->rel_size;
-    portEXIT_CRITICAL(&v->mux);
+    std::string status, ver, apps;
+    size_t sz = 0;
+    {
+        LockGuard g(v->lock);
+        status = v->status_text;
+        ver = v->rel_version;
+        apps = v->rel_apps;
+        sz = v->rel_size;
+    }
 
     if (v->has_release.load()) {
         char info[256];
@@ -559,6 +582,7 @@ lv_obj_t* EspdeckOtaScreen::Create() {
 
     auto* v = new OtaView{};
     v->screen = scr;
+    v->lock = xSemaphoreCreateMutex();
     g_ota = v;
 
     // Header
@@ -675,7 +699,7 @@ lv_obj_t* EspdeckOtaScreen::Create() {
     });
     lv_obj_set_pos(v->btn_upgrade, 250, 688);
 
-    xTaskCreate(workerTask, "espdeck_ota", 8192, v, 4, &v->worker);
+    xTaskCreate(workerTask, "espdeck_ota", 10240, v, 4, &v->worker);
     v->ui_timer = lv_timer_create(refreshUi, 400, v);
     refreshUi(v->ui_timer);
 
@@ -692,6 +716,10 @@ lv_obj_t* EspdeckOtaScreen::Create() {
         // Wait briefly for worker socket to close
         for (int i = 0; i < 15 && view->worker != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(30));
+        }
+        if (view->lock) {
+            vSemaphoreDelete(view->lock);
+            view->lock = nullptr;
         }
         if (g_ota == view) g_ota = nullptr;
         delete view;
